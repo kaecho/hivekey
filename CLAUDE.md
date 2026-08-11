@@ -15,7 +15,7 @@ Self-hosted LLM API key pool (Express + vanilla JS SPA). No build step, no TypeS
 
 ## Deployment (IMPORTANT — auto-deploy rule)
 
-Production runs the Docker image `ghcr.io/emptysuns/hivekey:latest`, built for amd64+arm64 by the `Docker` GitHub Actions workflow on every push to `main`.
+Production runs the Docker image `ghcr.io/kaecho/hivekey:latest`, built for amd64+arm64 by the `Docker` GitHub Actions workflow on every push to `main`.
 
 **Whenever a change is pushed to `main` (i.e. the image gets rebuilt), deploy it to the production server without being asked:**
 

@@ -39,13 +39,13 @@ docker run -d --name hivekey \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=change-me-please \
   -v pool-data:/app/data \
-  ghcr.io/emptysuns/hivekey:latest   # or build locally: docker build -t hivekey .
+  ghcr.io/kaecho/hivekey:latest   # or build locally: docker build -t hivekey .
 ```
 
 ### Docker Compose
 
 ```bash
-git clone https://github.com/emptysuns/hivekey.git
+git clone https://github.com/kaecho/hivekey.git
 cd hivekey
 # edit docker-compose.yml (set ADMIN_PASSWORD!)
 docker compose up -d
@@ -54,7 +54,7 @@ docker compose up -d
 ### Node.js (≥ 18.17)
 
 ```bash
-git clone https://github.com/emptysuns/hivekey.git
+git clone https://github.com/kaecho/hivekey.git
 cd hivekey
 npm ci
 ADMIN_USERNAME=admin ADMIN_PASSWORD=change-me npm start
