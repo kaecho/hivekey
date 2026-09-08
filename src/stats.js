@@ -15,9 +15,12 @@ class Stats {
       success: 0,
       failed: 0,
       retries: 0,
+      recovered: 0,
       promptTokens: 0,
       completionTokens: 0,
     };
+    this.policyCounts = {};
+    this.lastDecision = null;
     this.live = new Map(); // requestId -> live entry
     this.logs = []; // newest first
     this.buckets = new Map(); // minuteTs -> {ts, requests, success, failed, latencySum, latencyCount}
@@ -61,6 +64,12 @@ class Stats {
     const ok = logEntry.status === 'success';
     if (ok) this.totals.success += 1;
     else this.totals.failed += 1;
+    if (ok && logEntry.attempts > 1) this.totals.recovered += 1;
+    if (logEntry.routing) {
+      this.lastDecision = { ...logEntry.routing, ts: now };
+      const strategy = logEntry.routing.effectiveStrategy;
+      this.policyCounts[strategy] = (this.policyCounts[strategy] || 0) + 1;
+    }
     this.totals.retries += Math.max(0, (logEntry.attempts || 1) - 1);
     this.totals.promptTokens += logEntry.promptTokens || 0;
     this.totals.completionTokens += logEntry.completionTokens || 0;

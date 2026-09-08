@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:ui": "playwright test"
   },
   "engines": {
     "node": ">=18.17"
@@ -23,7 +24,13 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^4.22.2",
     "undici": "^6.21.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }

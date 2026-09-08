@@ -11,7 +11,9 @@ Self-hosted LLM API key pool (Express + vanilla JS SPA). No build step, no TypeS
 ## Layout
 
 - `src/` — Express backend. `index.js` wires everything; `routes/admin.js` is the admin API; `proxy.js` the `/v1` + `/v1beta` proxy; `adapters.js` translates inbound Anthropic/Responses/Gemini protocols to the OpenAI upstream (requests, responses and SSE streams); `pool.js` channels/keys; `scheduler.js` key selection; `store.js` JSON persistence under `data/`.
-- `public/` — dashboard SPA: `index.html` (shell), `app.js` (all views as template strings, event delegation via `data-action`), `style.css`, `i18n.js` (English keys → zh-CN; every user-visible string must go through `t()` and get a zh-CN entry).
+- `public/` — dashboard SPA: `index.html` (shell), `app.js` (router/bootstrap), `js/views/` (page rendering), `js/actions/` (`data-action` handlers), `js/core.js` (shared state/API), `js/realtime.js` (SSE), `css/` (tokens/components/layout). `i18n.js` loads `js/locales/zh-cn.js`; every user-visible string must go through `t()` and get a zh-CN entry. Native ES modules; no bundler.
+- `src/circuit-breaker.js` — runtime channel isolation/recovery; `src/routes/routing.js` — diagnostics and side-effect-free routing preview. Strategy metadata lives only in `src/scheduler.js`.
+- `e2e/` — Playwright UI workflows using a temporary local fixture (`npm run test:ui`).
 
 ## Deployment (IMPORTANT — auto-deploy rule)
 

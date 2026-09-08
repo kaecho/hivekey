@@ -1,7 +1,8 @@
 'use strict';
 const { request: undiciRequest, Agent, ProxyAgent } = require('undici');
 const { genId, maskKey, parseRetryAfterMs } = require('./util');
-const { selectCandidate } = require('./scheduler');
+const { selectCandidate, resolveStrategy } = require('./scheduler');
+const { Readable } = require('node:stream');
 const {
   detectRoute,
   estimateAnthropicTokens,
@@ -229,8 +230,9 @@ function jsonError(res, status, message) {
 
 function createProxyHandler({ pool, store, stats, events, config }) {
   return async function handleProxyRequest(req, res) {
-    const settings = store.settings;
+    const settings = { ...store.settings, retryOn: [...store.settings.retryOn] };
     const started = Date.now();
+    const deadline = started + settings.requestTimeoutMs;
     let rawBody = Buffer.isBuffer(req.body) && req.body.length ? req.body : null;
 
     // extract model / stream flag from JSON bodies for routing + logs
@@ -314,6 +316,7 @@ function createProxyHandler({ pool, store, stats, events, config }) {
     const thinking = describeThinking(parsedBody);
 
     const id = genId('req');
+    res.setHeader('x-pool-request-id', id);
     const live = {
       id,
       ts: started,
@@ -328,11 +331,14 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       keyId: null,
       keyMasked: null,
       attempts: 0,
+      routing: null,
     };
     stats.requestStarted(live);
     events.broadcast('request', { phase: 'start', entry: live });
 
     const tried = new Set();
+    const failedChannels = new Set();
+    const candidateOptions = () => ({ avoidChannelIds: settings.preferDifferentChannel ? failedChannels : new Set() });
     const retriesDetail = [];
     let clientGone = false;
     let finished = false;
@@ -354,6 +360,7 @@ function createProxyHandler({ pool, store, stats, events, config }) {
         keyId: live.keyId,
         keyMasked: live.keyMasked,
         attempts: live.attempts,
+        routing: live.routing,
         latencyMs: Date.now() - started,
         ttftMs: null,
         tokensPerSec: null,
@@ -389,8 +396,15 @@ function createProxyHandler({ pool, store, stats, events, config }) {
         return;
       }
 
-      const candidates = pool.candidates(model, tried);
-      const picked = selectCandidate(candidates, settings.strategy, pool);
+      if (Date.now() >= deadline) {
+        finish({ status: 'error', statusCode: 504, error: 'request deadline exceeded' });
+        sendError(504, 'request deadline exceeded');
+        return;
+      }
+      const candidates = pool.candidates(model, tried, candidateOptions());
+      const context = { stream: streamRequested, maxTokens: Number(parsedBody?.max_completion_tokens || parsedBody?.max_tokens) || 0, attempt };
+      const decision = resolveStrategy(settings.strategy, candidates, context);
+      const picked = selectCandidate(candidates, decision.effectiveStrategy, pool, context);
       if (!picked) {
         const detail = lastFailure
           ? `last upstream failure: ${lastFailure.statusCode || ''} ${lastFailure.message || ''}`.trim()
@@ -402,21 +416,31 @@ function createProxyHandler({ pool, store, stats, events, config }) {
 
       const { channel, key } = picked;
       tried.add(key.id);
-      key.inflight = (key.inflight || 0) + 1;
+      const lease = pool.acquire(picked);
+      if (!lease) {
+        finish({ status: 'error', statusCode: 503, error: 'channel recovery probe already in flight' });
+        sendError(503, 'channel recovery probe already in flight');
+        return;
+      }
+      let firstByteTimer;
+      let requestTimer;
       let inflightReleased = false;
       const release = () => {
         if (!inflightReleased) {
           inflightReleased = true;
-          key.inflight = Math.max(0, (key.inflight || 1) - 1);
+          clearTimeout(firstByteTimer);
+          clearTimeout(requestTimer);
+          pool.release(lease);
         }
       };
 
       live.attempts = attempt;
+      live.routing = { ...decision, priority: channel.priority || 0, candidateCount: candidates.length };
       live.channelId = channel.id;
       live.channelName = channel.name;
       live.keyId = key.id;
       live.keyMasked = maskKey(key.key);
-      if (attempt > 1) events.broadcast('request', { phase: 'retry', entry: { ...live, elapsedMs: Date.now() - started } });
+      events.broadcast('request', { phase: attempt > 1 ? 'retry' : 'attempt', entry: { ...live, elapsedMs: Date.now() - started } });
 
       // ----- build the outbound request -----
       const url = normalizeBaseUrl(channel.baseUrl) + targetPath;
@@ -451,6 +475,23 @@ function createProxyHandler({ pool, store, stats, events, config }) {
 
       const attemptStarted = Date.now();
       let upstream;
+      let headersLatency = 0;
+      let prefetchedAt = 0;
+      let timeoutKind = null;
+      const expire = (kind) => {
+        if (controller.signal.aborted) return;
+        timeoutKind = Date.now() >= deadline ? 'request deadline exceeded' : kind;
+        controller.abort();
+      };
+      const remainingMs = Math.max(1, deadline - Date.now());
+      requestTimer = setTimeout(() => expire('request deadline exceeded'), remainingMs);
+      // Do not clip the first-byte timer to the shared deadline: two timers at
+      // the same instant can race and incorrectly charge the key for our budget.
+      if (settings.firstByteTimeoutMs < remainingMs) {
+        firstByteTimer = setTimeout(() => expire('first byte timeout'), settings.firstByteTimeoutMs);
+        firstByteTimer.unref?.();
+      }
+      requestTimer.unref?.();
       try {
         upstream = await undiciRequest(url, {
           method: adapter ? 'POST' : req.method,
@@ -462,6 +503,25 @@ function createProxyHandler({ pool, store, stats, events, config }) {
           maxRedirections: 0,
           signal: controller.signal,
         });
+        headersLatency = Date.now() - attemptStarted;
+        // Do not commit downstream headers before the first upstream byte.
+        // Once bytes are forwarded, retries are forbidden (no duplicate tokens/tools).
+        if (upstream.statusCode < 400 && upstream.statusCode !== 204 && req.method !== 'HEAD') {
+          const source = upstream.body;
+          const iterator = source[Symbol.asyncIterator]();
+          const first = await iterator.next();
+          prefetchedAt = Date.now();
+          if (first.done && streamRequested) throw new Error('empty upstream stream');
+          upstream.body = Readable.from((async function* () {
+            try {
+              if (!first.done) yield first.value;
+              for await (const chunk of iterator) yield chunk;
+            } finally {
+              if (!source.readableEnded) source.destroy();
+            }
+          })(), { objectMode: false });
+        }
+        clearTimeout(firstByteTimer);
       } catch (err) {
         release();
         res.removeListener('close', onClientClose);
@@ -469,29 +529,41 @@ function createProxyHandler({ pool, store, stats, events, config }) {
           finish({ status: 'error', error: 'client disconnected before completion' });
           return;
         }
-        const message = `network error: ${err?.cause?.code || err?.code || err?.message || 'unknown'}`;
-        pool.markError(key, message);
+        const message = timeoutKind || `network error: ${err?.cause?.code || err?.code || err?.message || 'unknown'}`;
+        if (timeoutKind === 'request deadline exceeded') {
+          // Exhausting the caller's shared budget is not evidence of a bad channel.
+          pool.markNeutralFailure(key, message);
+        } else {
+          pool.markError(key, message);
+          pool.circuits.failure(lease, message);
+          failedChannels.add(channel.id);
+        }
         lastFailure = { statusCode: 0, message };
-        retriesDetail.push({ channelName: channel.name, keyMasked: live.keyMasked, statusCode: 0, error: message });
-        if (attempt < maxAttempts) continue;
-        finish({ status: 'error', statusCode: 502, error: message });
-        sendError(502, `upstream request failed after ${attempt} attempt(s): ${message}`);
+        retriesDetail.push({ channelName: channel.name, keyMasked: live.keyMasked, statusCode: 0, error: message, strategy: decision.effectiveStrategy });
+        if (attempt < maxAttempts && Date.now() < deadline && pool.candidates(model, tried, candidateOptions()).length) continue;
+        const failureStatus = timeoutKind ? 504 : 502;
+        finish({ status: 'error', statusCode: failureStatus, error: message });
+        sendError(failureStatus, `upstream request failed after ${attempt} attempt(s): ${message}`);
         return;
       }
 
       const { statusCode } = upstream;
-      const headersLatency = Date.now() - attemptStarted;
       // 404 is often "this key can't access this model" (NVIDIA NIM etc.), not a
       // bad request — failover to another key without punishing key health.
       const keyScopedNotFound = statusCode === 404;
       const retryable = settings.retryOn.includes(statusCode) || keyScopedNotFound;
-      const canRetryMore = attempt < maxAttempts && pool.candidates(model, tried).length > 0;
+      const canRetryMore = attempt < maxAttempts && pool.candidates(model, tried, candidateOptions()).length > 0;
 
       const markFailureFor = (code, snippet) => {
-        const message = `${code} ${snippet || ''}`.trim().slice(0, 300);
+        const message = `${code} ${snippet || ''}`.split(key.key).join(maskKey(key.key)).trim().slice(0, 300);
+        if (code >= 500) {
+          pool.circuits.failure(lease, message);
+          failedChannels.add(channel.id);
+        } else pool.circuits.success(lease);
         if (code === 429) pool.mark429(key, parseRetryAfterMs(upstream.headers['retry-after']));
         else if (code === 401 || code === 403) pool.markError(key, message, { hard: true });
-        else pool.markError(key, message);
+        else if (code >= 500) pool.markError(key, message);
+        else pool.markNeutralFailure(key, message);
         return message;
       };
 
@@ -503,11 +575,12 @@ function createProxyHandler({ pool, store, stats, events, config }) {
         if (keyScopedNotFound) {
           message = upstreamErrorMessage(snippet, `upstream responded ${statusCode}`);
           pool.markNeutralFailure(key, `${statusCode} ${message}`.slice(0, 300));
+          pool.circuits.success(lease);
         } else {
           message = markFailureFor(statusCode, snippet);
         }
         lastFailure = { statusCode, message };
-        retriesDetail.push({ channelName: channel.name, keyMasked: live.keyMasked, statusCode, error: message });
+        retriesDetail.push({ channelName: channel.name, keyMasked: live.keyMasked, statusCode, error: message, strategy: decision.effectiveStrategy });
         continue;
       }
 
@@ -517,7 +590,7 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       const scanner = createUsageScanner(upstream.headers['content-type']);
       let firstByteAt = 0;
       const feedScanner = (chunk) => {
-        if (!firstByteAt) firstByteAt = Date.now();
+        if (!firstByteAt) firstByteAt = prefetchedAt || Date.now();
         scanner.feed(chunk);
       };
 
@@ -536,6 +609,7 @@ function createProxyHandler({ pool, store, stats, events, config }) {
               ? Math.round((usage.completionTokens / (durationMs / 1000)) * 10) / 10
               : null;
             pool.markSuccess(key, { latencyMs: headersLatency, ttftMs, tps }, usage);
+            pool.circuits.success(lease);
             finish({
               status: 'success',
               statusCode,
@@ -547,10 +621,11 @@ function createProxyHandler({ pool, store, stats, events, config }) {
           } else {
             const snippet = errMessage || `upstream responded ${statusCode}`;
             let message;
-            if (retryable) message = markFailureFor(statusCode, snippet);
+            if (statusCode >= 500 || [401, 403, 429].includes(statusCode)) message = markFailureFor(statusCode, snippet);
             else {
               message = snippet;
               pool.markNeutralFailure(key, message);
+              pool.circuits.success(lease);
             }
             lastFailure = { statusCode, message };
             finish({ status: 'error', statusCode, error: message });
@@ -559,7 +634,13 @@ function createProxyHandler({ pool, store, stats, events, config }) {
           controller.abort();
           finish({ status: 'error', statusCode, error: 'client disconnected mid-response' });
         } else {
-          pool.markError(key, errMessage || 'upstream stream error');
+          if (timeoutKind === 'request deadline exceeded') {
+            errMessage = timeoutKind;
+            pool.markNeutralFailure(key, errMessage);
+          } else {
+            pool.markError(key, errMessage || 'upstream stream error');
+            pool.circuits.failure(lease, errMessage || 'upstream stream error');
+          }
           finish({ status: 'error', statusCode, error: errMessage || 'upstream stream error' });
           if (res.headersSent) res.destroy();
           else sendError(502, errMessage || 'upstream stream error');
@@ -574,6 +655,9 @@ function createProxyHandler({ pool, store, stats, events, config }) {
             if (!HOP_BY_HOP.has(name.toLowerCase())) res.setHeader(name, value);
           }
           res.setHeader('x-pool-attempts', String(attempt));
+          res.setHeader('x-pool-request-id', id);
+          res.setHeader('x-pool-strategy', decision.effectiveStrategy);
+          res.setHeader('x-pool-failover', attempt > 1 ? 'true' : 'false');
           res.setHeader('x-pool-channel', sanitizeHeaderValue(channel.name));
           res.flushHeaders?.();
         }
@@ -590,6 +674,9 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       // ----- adapter: translate the upstream response into the caller's protocol -----
       if (!res.headersSent) {
         res.setHeader('x-pool-attempts', String(attempt));
+        res.setHeader('x-pool-request-id', id);
+        res.setHeader('x-pool-strategy', decision.effectiveStrategy);
+        res.setHeader('x-pool-failover', attempt > 1 ? 'true' : 'false');
         res.setHeader('x-pool-channel', sanitizeHeaderValue(channel.name));
       }
 

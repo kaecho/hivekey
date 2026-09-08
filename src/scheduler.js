@@ -1,10 +1,21 @@
 'use strict';
 
-/**
- * Key-selection strategies. Each receives the candidate list produced by
- * Pool.candidates() — [{channel, key}] from the best available priority tier —
- * and returns one entry (or null).
- */
+// One registry drives validation, the routing API and dashboard strategy cards.
+const STRATEGY_DEFINITIONS = [
+  { id: 'auto', label: 'Automatic', description: 'Switches policy per request using health, concurrency and response type.', group: 'smart' },
+  { id: 'adaptive', label: 'Smart (adaptive)', description: 'Balances recent health, first-token latency, throughput and channel weight.', group: 'smart' },
+  { id: 'latency_aware', label: 'Latency aware', description: 'Balances predicted queue time and generation speed without concentrating all traffic on one key.', group: 'smart' },
+  { id: 'reliability_first', label: 'Reliability first', description: 'Strongly favors recently healthy keys while retaining exploration and load balancing.', group: 'smart' },
+  { id: 'power_of_two', label: 'Power of two choices', description: 'Samples two weighted candidates and chooses the less loaded, faster one.', group: 'smart' },
+  { id: 'round_robin', label: 'Round robin', description: 'Cycles through active keys in fixed order.', group: 'classic' },
+  { id: 'random', label: 'Random', description: 'Picks a uniformly random active key.', group: 'classic' },
+  { id: 'weighted', label: 'Weighted', description: 'Random pick biased by channel weight.', group: 'classic' },
+  { id: 'least_inflight', label: 'Least in-flight', description: 'Prefers the key with the fewest requests in flight.', group: 'classic' },
+  { id: 'lowest_latency', label: 'Lowest latency', description: 'Prefers the key with the lowest recent average latency.', group: 'classic' },
+  { id: 'lowest_ttft', label: 'Fastest first token', description: 'Prefers the key with the lowest time to first token.', group: 'classic' },
+  { id: 'highest_throughput', label: 'Highest throughput', description: 'Prefers the key with the highest tokens-per-second output.', group: 'classic' },
+];
+const STRATEGY_NAMES = STRATEGY_DEFINITIONS.map((s) => s.id);
 
 function pickRandom(list) {
   return list[Math.floor(Math.random() * list.length)];
@@ -13,9 +24,10 @@ function pickRandom(list) {
 function weightedRandom(list, weightOf) {
   let total = 0;
   const weights = list.map((c) => {
-    const w = Math.max(weightOf(c), 0.0001);
-    total += w;
-    return w;
+    const value = weightOf(c);
+    const weight = Number.isFinite(value) ? Math.max(value, 0.000001) : 0.000001;
+    total += weight;
+    return weight;
   });
   let r = Math.random() * total;
   for (let i = 0; i < list.length; i += 1) {
@@ -29,72 +41,87 @@ function minBy(list, valueOf) {
   let best = [];
   let bestVal = Infinity;
   for (const c of list) {
-    const v = valueOf(c);
-    if (v < bestVal) {
-      bestVal = v;
+    const value = valueOf(c);
+    if (value < bestVal) {
+      bestVal = value;
       best = [c];
-    } else if (v === bestVal) {
-      best.push(c);
-    }
+    } else if (value === bestVal) best.push(c);
   }
   return best.length ? pickRandom(best) : null;
 }
 
-/**
- * Composite score for the adaptive strategy:
- *   success-rate (Laplace-smoothed, squared to punish flaky keys)
- * × speed factor (1 / (1 + first-token-latency/1s); falls back to headers ewma)
- * × throughput factor (1..3, rewards higher observed tokens/sec)
- * × in-flight penalty (1 / (1 + inflight))
- * × channel weight
- * Selection is weighted-random over scores, so newer/idle keys keep getting
- * explored instead of the single best key absorbing all traffic.
- */
+function healthScore(key) {
+  const stats = key.stats || {};
+  const requests = Number.isFinite(stats.healthRequests) ? stats.healthRequests : stats.requests || 0;
+  const success = Number.isFinite(stats.healthSuccess) ? stats.healthSuccess : stats.success || 0;
+  const historical = (success + 1) / (requests + 2);
+  const recent = 1 - Math.min(1, Math.max(0, key.failureEwma || 0));
+  return Math.max(0.01, historical * recent);
+}
+
 function adaptiveScore({ channel, key }) {
-  const req = key.stats.requests;
-  const successRate = (key.stats.success + 1) / (req + 2);
   const firstTokenMs = key.ewmaTtftMs || key.ewmaLatencyMs || 0;
-  const speedFactor = 1 / (1 + firstTokenMs / 1000);
-  const throughputFactor = 1 + Math.min(key.ewmaTps || 0, 150) / 75;
-  const inflightPenalty = 1 / (1 + (key.inflight || 0));
-  return successRate * successRate * speedFactor * throughputFactor * inflightPenalty * (channel.weight || 1);
+  const speed = 1 / (1 + firstTokenMs / 1000);
+  const throughput = 1 + Math.min(key.ewmaTps || 0, 150) / 75;
+  return healthScore(key) ** 2 * speed * throughput * (channel.weight || 1) / (1 + (key.inflight || 0));
+}
+
+function latencyScore({ channel, key }, context = {}) {
+  const ttft = key.ewmaTtftMs || key.ewmaLatencyMs || 500;
+  const outputMs = context.maxTokens >= 4096 ? Math.min(context.maxTokens, 131072) / (key.ewmaTps || 30) * 1000 : 0;
+  const predicted = (ttft + outputMs) * (1 + (key.inflight || 0));
+  return healthScore(key) ** 2 * (channel.weight || 1) / (1 + predicted / 1000);
+}
+
+/** Pure policy resolution: preview does not advance counters or consume probes. */
+function resolveStrategy(name, candidates, context = {}) {
+  const configuredStrategy = STRATEGY_NAMES.includes(name) ? name : 'adaptive';
+  if (configuredStrategy !== 'auto') {
+    return { configuredStrategy, effectiveStrategy: configuredStrategy, reason: 'Manually selected policy.' };
+  }
+  let effectiveStrategy = 'adaptive';
+  let reason = 'Balanced traffic: explore healthy keys.';
+  const load = candidates.reduce((n, c) => n + (c.key.inflight || 0), 0);
+  if (context.attempt > 1 || candidates.some((c) => (c.key.failureEwma || 0) >= 0.25)) {
+    effectiveStrategy = 'reliability_first';
+    reason = 'Recent failures: prefer healthy alternatives.';
+  } else if (candidates.length && load >= candidates.length) {
+    effectiveStrategy = 'power_of_two';
+    reason = 'High concurrency: spread active requests.';
+  } else if (context.maxTokens >= 4096) {
+    effectiveStrategy = 'latency_aware';
+    reason = 'Long output: balance generation speed and queue time.';
+  } else if (context.stream) {
+    effectiveStrategy = 'latency_aware';
+    reason = 'Streaming: prioritize first-token latency.';
+  }
+  return { configuredStrategy, effectiveStrategy, reason };
 }
 
 const strategies = {
-  round_robin(candidates, pool) {
-    const sorted = [...candidates].sort((a, b) => (a.key.id < b.key.id ? -1 : 1));
-    return sorted[pool.nextRoundRobin() % sorted.length];
-  },
-  random(candidates) {
-    return pickRandom(candidates);
-  },
-  weighted(candidates) {
-    return weightedRandom(candidates, (c) => c.channel.weight || 1);
-  },
-  least_inflight(candidates) {
-    return minBy(candidates, (c) => c.key.inflight || 0);
-  },
-  lowest_latency(candidates) {
-    // unused keys have ewma 0 → they get tried first (built-in exploration)
-    return minBy(candidates, (c) => c.key.ewmaLatencyMs || 0);
-  },
-  lowest_ttft(candidates) {
-    // time-to-first-token; unused keys (0) explored first, headers ewma as fallback
-    return minBy(candidates, (c) => c.key.ewmaTtftMs || c.key.ewmaLatencyMs || 0);
-  },
-  highest_throughput(candidates) {
-    // max tokens/sec; keys with no throughput data yet explored first
-    return minBy(candidates, (c) => -(c.key.ewmaTps || Infinity));
-  },
-  adaptive(candidates) {
-    return weightedRandom(candidates, adaptiveScore);
+  round_robin: (list, pool) => [...list].sort((a, b) => a.key.id.localeCompare(b.key.id))[pool.nextRoundRobin() % list.length],
+  random: (list) => pickRandom(list),
+  weighted: (list) => weightedRandom(list, (c) => c.channel.weight || 1),
+  least_inflight: (list) => minBy(list, (c) => c.key.inflight || 0),
+  lowest_latency: (list) => minBy(list, (c) => c.key.ewmaLatencyMs || 0),
+  lowest_ttft: (list) => minBy(list, (c) => c.key.ewmaTtftMs || c.key.ewmaLatencyMs || 0),
+  highest_throughput: (list) => minBy(list, (c) => -(c.key.ewmaTps || Infinity)),
+  adaptive: (list) => weightedRandom(list, adaptiveScore),
+  latency_aware: (list, pool, context) => weightedRandom(list, (c) => latencyScore(c, context)),
+  reliability_first: (list) => weightedRandom(list, (c) => healthScore(c.key) ** 4 * (c.channel.weight || 1) / (1 + (c.key.inflight || 0))),
+  power_of_two(list) {
+    if (list.length === 1) return list[0];
+    const first = weightedRandom(list, (c) => c.channel.weight || 1);
+    const second = weightedRandom(list.filter((c) => c !== first), (c) => c.channel.weight || 1);
+    return minBy([first, second], (c) => (1 + (c.key.inflight || 0)) * (c.key.ewmaTtftMs || c.key.ewmaLatencyMs || 500) / Math.max(0.05, healthScore(c.key)));
   },
 };
+strategies.auto = (list, pool, context) => strategies[resolveStrategy('auto', list, context).effectiveStrategy](list, pool, context);
 
-function selectCandidate(candidates, strategyName, pool) {
+function selectCandidate(candidates, strategyName, pool, context = {}) {
   if (!candidates.length) return null;
-  const strategy = strategies[strategyName] || strategies.adaptive;
-  return strategy(candidates, pool) || null;
+  const strategy = Object.prototype.hasOwnProperty.call(strategies, strategyName) ? strategies[strategyName] : strategies.adaptive;
+  return strategy(candidates, pool, context) || null;
 }
 
-module.exports = { selectCandidate, strategies, adaptiveScore };
+module.exports = { selectCandidate, resolveStrategy, strategies, adaptiveScore, healthScore, STRATEGY_DEFINITIONS, STRATEGY_NAMES };

@@ -346,6 +346,9 @@ test('retries on 404 with a different key without cooling the first key down', a
     method: 'PUT',
     body: { strategy: 'round_robin', maxAttempts: 3 },
   });
+  // Key IDs are random: explicitly position the round-robin fixture.
+  const ordered = [...appCtx.pool.keysByChannel.get(ch.json.id)].sort((a, b) => a.id.localeCompare(b.id));
+  appCtx.pool._rrCounter = ordered.findIndex((k) => k.key === 'no-model-key') - 1;
 
   const res = await fetch(`${base}/v1/chat/completions`, {
     method: 'POST',

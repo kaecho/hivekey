@@ -8,20 +8,21 @@
 (function () {
   try {
     var t = localStorage.getItem('hivekey-theme');
-    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    document.documentElement.setAttribute('data-theme', t === 'light' || t === 'dark' ? t : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
   } catch (e) { /* storage unavailable */ }
 })();
 </script>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23141311'/%3E%3Cpath d='M12 3.4l7.4 4.3v8.6L12 20.6l-7.4-4.3V7.7z' fill='none' stroke='%23f0b429' stroke-width='1.7'/%3E%3Ccircle cx='12' cy='12' r='2.6' fill='%23f0b429'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231b3730'/%3E%3Cpath d='M12 3.4l7.4 4.3v8.6L12 20.6l-7.4-4.3V7.7z' fill='none' stroke='%235bceab' stroke-width='1.7'/%3E%3Ccircle cx='12' cy='12' r='2.6' fill='%235bceab'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<a class="skip-link" href="#main" data-action="skip-content" data-i18n="Skip to content">Skip to content</a>
 
 <!-- Login -->
 <div id="login-view" class="hidden">
   <form id="login-form" class="login-card" autocomplete="on">
     <div class="login-brand">
-      <svg class="mark" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l7.4 4.3v8.6L12 20.6l-7.4-4.3V7.7z" fill="none" stroke="#f0b429" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="#f0b429"/></svg>
+      <svg class="mark" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l7.4 4.3v8.6L12 20.6l-7.4-4.3V7.7z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg>
       <h1>HiveKey</h1>
     </div>
     <p class="login-sub" data-i18n="Sign in to the admin console">Sign in to the admin console</p>
@@ -36,7 +37,7 @@
     <button type="submit" class="btn btn-primary btn-block" id="login-btn" data-i18n="Sign in">Sign in</button>
     <div id="login-error" class="login-error hidden"></div>
     <div class="login-lang">
-      <div class="theme-seg" role="group" aria-label="Theme">
+      <div class="theme-seg" role="group" aria-label="Theme" data-i18n-aria="Theme">
         <button type="button" data-action="theme-set" data-theme-opt="auto" data-i18n-title="Auto" title="Auto">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -47,7 +48,7 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
         </button>
       </div>
-      <select data-lang-sel aria-label="Language">
+      <select data-lang-sel aria-label="Language" data-i18n-aria="Language">
         <option value="en">English</option>
         <option value="zh-CN">中文</option>
       </select>
@@ -57,27 +58,31 @@
 
 <!-- App shell -->
 <div id="shell" class="hidden">
+  <button class="sidebar-overlay" data-action="sidebar-close" aria-label="Close navigation" data-i18n-aria="Close navigation"></button>
   <aside id="sidebar">
     <div class="brand">
-      <svg class="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l7.4 4.3v8.6L12 20.6l-7.4-4.3V7.7z" fill="none" stroke="#f0b429" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="#f0b429"/></svg>
-      <span class="brand-name">HiveKey</span>
+      <svg class="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l7.4 4.3v8.6L12 20.6l-7.4-4.3V7.7z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg>
+      <span><span class="brand-name">HiveKey</span><span class="brand-caption" data-i18n="API CONTROL PLANE">API CONTROL PLANE</span></span>
     </div>
-    <nav id="nav">
-      <a href="#/dashboard" data-route="dashboard" data-i18n-title="Dashboard" title="Dashboard">
+    <div class="workspace-card"><span class="workspace-avatar">H</span><div><strong data-i18n="My workspace">My workspace</strong><small data-i18n="Self-hosted instance">Self-hosted instance</small></div><span class="workspace-dot"></span></div>
+    <div class="nav-label" data-i18n="WORKSPACE">WORKSPACE</div>
+    <nav id="nav" aria-label="Main navigation" data-i18n-aria="Main navigation">
+      <a href="#/dashboard" data-route="dashboard" data-i18n-title="Overview" title="Overview">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg>
-        <span class="lbl" data-i18n="Dashboard">Dashboard</span>
+        <span class="lbl" data-i18n="Overview">Overview</span>
       </a>
       <a href="#/channels" data-route="channels" data-i18n-title="Channels" title="Channels">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M6.6 7.5h.01M6.6 16.5h.01"/></svg>
         <span class="lbl" data-i18n="Channels">Channels</span>
       </a>
+      <a href="#/routing" data-route="routing" data-i18n-title="Smart routing" title="Smart routing"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 6h4a4 4 0 0 1 4 4v4a4 4 0 0 0 4 4h4m-4-4 4 4-4 4M4 18h3M16 6h4m-4-4 4 4-4 4"/></svg><span class="lbl" data-i18n="Smart routing">Smart routing</span><span class="nav-tag" data-i18n="AUTO">AUTO</span></a>
       <a href="#/tokens" data-route="tokens" data-i18n-title="Tokens" title="Access tokens">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="4.2"/><path d="M12.2 12H21M17.5 12v3.2M20.9 12v2.2"/></svg>
-        <span class="lbl" data-i18n="Tokens">Tokens</span>
+        <span class="lbl" data-i18n="Access tokens">Access tokens</span>
       </a>
       <a href="#/logs" data-route="logs" data-i18n-title="Logs" title="Logs">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M4 6h.01M4 12h.01M4 18h.01M8.5 6H20M8.5 12H20M8.5 18H20"/></svg>
-        <span class="lbl" data-i18n="Logs">Logs</span>
+        <span class="lbl" data-i18n="Request logs">Request logs</span>
       </a>
       <a href="#/settings" data-route="settings" data-i18n-title="Settings" title="Settings">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M4 7.5h7.5M17.5 7.5H20M4 16.5h2.5M12.5 16.5H20"/><circle cx="14.5" cy="7.5" r="2.2"/><circle cx="9.5" cy="16.5" r="2.2"/></svg>
@@ -85,9 +90,9 @@
       </a>
     </nav>
     <div class="sidebar-foot">
-      <div id="conn-status"><span class="conn-dot"></span><span class="conn-text">Disconnected</span></div>
+      <div class="sidebar-note"><strong data-i18n="One endpoint. Every model.">One endpoint. Every model.</strong><span data-i18n="Your keys stay on your server.">Your keys stay on your server.</span></div>
       <div id="whoami"></div>
-      <div class="theme-seg" role="group" aria-label="Theme">
+      <div class="theme-seg" role="group" aria-label="Theme" data-i18n-aria="Theme">
         <button type="button" data-action="theme-set" data-theme-opt="auto" data-i18n-title="Auto" title="Auto">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -98,7 +103,7 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
         </button>
       </div>
-      <select class="lang-sel" data-lang-sel aria-label="Language">
+      <select class="lang-sel" data-lang-sel aria-label="Language" data-i18n-aria="Language">
         <option value="en">English</option>
         <option value="zh-CN">中文</option>
       </select>
@@ -108,15 +113,20 @@
       </button>
     </div>
   </aside>
-  <main id="main">
-    <div id="view"></div>
-  </main>
+  <div class="main-shell">
+    <header class="topbar">
+      <button class="btn btn-icon mobile-menu" data-action="sidebar-toggle" aria-label="Open navigation" data-i18n-aria="Open navigation" aria-expanded="false">☰</button>
+      <div class="breadcrumb"><span data-i18n="Workspace">Workspace</span><span>/</span><strong id="route-title"></strong></div>
+      <button class="quick-search" data-action="global-search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><span data-i18n="Search requests…">Search requests…</span><kbd>/</kbd></button>
+      <div id="conn-status" role="status"><span class="conn-dot"></span><span class="conn-text" data-i18n="Disconnected">Disconnected</span></div>
+    </header>
+    <main id="main" tabindex="-1"><div id="view"></div><footer class="main-footer"><span>HiveKey</span><span data-i18n="Private by design. Built for reliability.">Private by design. Built for reliability.</span><a href="/health" target="_blank" rel="noopener" data-i18n="Health check">Health check</a></footer></main>
+  </div>
 </div>
 
 <div id="modal-root" class="hidden"></div>
-<div id="toast-root"></div>
+<div id="toast-root" role="status" aria-live="polite"></div>
 
-<script src="i18n.js"></script>
-<script src="app.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

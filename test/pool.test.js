@@ -153,7 +153,7 @@ test('store persists and reloads channels, keys and settings', () => {
 test('updateSettings rejects invalid values', () => {
   const { store } = ctx;
   store.updateSettings({ strategy: 'nonsense', maxAttempts: -5, retryOn: '429,500,999,abc' });
-  assert.strictEqual(store.settings.strategy, 'adaptive');
+  assert.strictEqual(store.settings.strategy, 'auto');
   assert.strictEqual(store.settings.maxAttempts, 3);
   assert.deepStrictEqual(store.settings.retryOn, [429, 500]);
 });

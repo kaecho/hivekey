@@ -9,6 +9,7 @@ const { Pool } = require('./pool');
 const { Auth } = require('./auth');
 const { createProxyHandler, closeDispatchers } = require('./proxy');
 const { createAdminRouter } = require('./routes/admin');
+const { routingStatus } = require('./routes/routing');
 const log = require('./log');
 
 function createApp(overrides = {}) {
@@ -31,6 +32,7 @@ function createApp(overrides = {}) {
   // permissive CORS so browser-based clients can call the pool directly
   const corsMiddleware = (req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'x-pool-attempts, x-pool-channel, x-pool-request-id, x-pool-strategy, x-pool-failover');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
@@ -130,6 +132,7 @@ function createApp(overrides = {}) {
       avgTps: stats.avgTps(),
       keyCounts: pool.keyCounts(),
       problemKeys: pool.problemKeys(),
+      routing: routingStatus(pool, stats),
     });
   }, 5000);
   sweepTimer.unref?.();

@@ -5,3 +5,7 @@ CLAUDE.local.md
 *.log
 .DS_Store
 .playwright-mcp/
+
+# Browser test artifacts
+playwright-report/
+test-results/

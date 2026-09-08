@@ -1,5 +1,6 @@
 'use strict';
 const { genId, maskKey, clamp } = require('./util');
+const { CircuitBreaker } = require('./circuit-breaker');
 
 /**
  * The pool: channels + keys registry, runtime key health state
@@ -19,6 +20,9 @@ class Pool {
     this.keysById = new Map();
     this.keysByChannel = new Map(); // channelId -> Key[]
     this._rrCounter = 0;
+    this.circuits = new CircuitBreaker(() => store.settings, (channelId, circuit) => {
+      events.broadcast('routing', { channelId, circuit });
+    });
     this._reindex();
     // runtime-only fields are not persisted; reset them on boot
     for (const key of this.store.data.keys) {
@@ -35,6 +39,8 @@ class Pool {
       success: 0,
       failed: 0,
       count429: 0,
+      healthRequests: 0,
+      healthSuccess: 0,
       promptTokens: 0,
       completionTokens: 0,
       lastUsedAt: 0,
@@ -86,6 +92,7 @@ class Pool {
   deleteChannel(id) {
     const ch = this.channelsById.get(id);
     if (!ch) return false;
+    this.circuits.entries.delete(id);
     this.store.data.channels = this.store.data.channels.filter((c) => c.id !== id);
     this.store.data.keys = this.store.data.keys.filter((k) => k.channelId !== id);
     this._reindex();
@@ -110,6 +117,14 @@ class Pool {
         throw Object.assign(new Error('proxy must be an http(s):// URL (SOCKS is not supported)'), { status: 400 });
       }
       return s;
+    });
+    setIf('maxInflight', (v) => {
+      if (v === undefined) return 0;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0 || n > 100000) {
+        throw Object.assign(new Error('maxInflight must be an integer from 0 to 100000'), { status: 400 });
+      }
+      return n;
     });
     setIf('priority', (v) => clamp(parseInt(v, 10) || 0, -1000, 1000));
     setIf('weight', (v) => {
@@ -177,6 +192,7 @@ class Pool {
         ewmaTtftMs: 0,
         ewmaTps: 0,
         inflight: 0,
+        failureEwma: 0,
         stats: this._emptyStats(),
       };
       this.store.data.keys.push(key);
@@ -224,6 +240,7 @@ class Pool {
       key.enabled = true;
     }
     key.stats.lastError = null;
+    key.failureEwma = 0;
     this.store.save();
     this._emitKey(key);
     return key;
@@ -248,10 +265,11 @@ class Pool {
    * only the highest-priority tier that has any available key is returned.
    * `excludeKeyIds` removes keys already tried in this request.
    */
-  candidates(model, excludeKeyIds = new Set()) {
+  candidates(model, excludeKeyIds = new Set(), { avoidChannelIds = new Set() } = {}) {
     const now = Date.now();
     const channels = this.store.data.channels
-      .filter((ch) => ch.enabled)
+      .filter((ch) => ch.enabled && this.circuits.available(ch.id))
+      .filter((ch) => !ch.maxInflight || this.channelInflight(ch.id) < ch.maxInflight)
       .filter((ch) => !model || !ch.models?.length || Pool.modelMatches(ch.models, model))
       .sort((a, b) => b.priority - a.priority);
 
@@ -261,6 +279,8 @@ class Pool {
       for (const key of keys) {
         if (excludeKeyIds.has(key.id)) continue;
         if (this.keyStatus(key, now) !== 'active') continue;
+        const cap = this.store.settings.maxInflightPerKey;
+        if (cap > 0 && (key.inflight || 0) >= cap) continue;
         let tier = tiers.get(ch.priority);
         if (!tier) {
           tier = [];
@@ -270,7 +290,51 @@ class Pool {
       }
     }
     const priorities = [...tiers.keys()].sort((a, b) => b - a);
+    // A retry first tries a different failure domain, including standby tiers.
+    if (avoidChannelIds.size) {
+      for (const priority of priorities) {
+        const alternatives = tiers.get(priority).filter((c) => !avoidChannelIds.has(c.channel.id));
+        if (alternatives.length) return alternatives;
+      }
+    }
     return priorities.length ? tiers.get(priorities[0]) : [];
+  }
+
+  channelInflight(id) {
+    return (this.keysByChannel.get(id) || []).reduce((n, k) => n + (k.inflight || 0), 0);
+  }
+
+  acquire(candidate) {
+    const { channel, key } = candidate;
+    const cap = this.store.settings.maxInflightPerKey;
+    if (!channel.enabled || this.keyStatus(key) !== 'active' ||
+        (cap > 0 && (key.inflight || 0) >= cap) ||
+        (channel.maxInflight > 0 && this.channelInflight(channel.id) >= channel.maxInflight)) return null;
+    const ticket = this.circuits.acquire(candidate.channel.id);
+    if (!ticket) return null;
+    candidate.key.inflight = (candidate.key.inflight || 0) + 1;
+    return { ...ticket, key: candidate.key, released: false };
+  }
+
+  release(ticket) {
+    if (ticket.released) return;
+    ticket.released = true;
+    ticket.key.inflight = Math.max(0, (ticket.key.inflight || 1) - 1);
+    this.circuits.release(ticket);
+  }
+
+  routingSummary() {
+    const channels = this.store.data.channels.filter((c) => c.enabled);
+    return {
+      strategy: this.store.settings.strategy,
+      enabledChannels: channels.length,
+      availableChannels: channels.filter((c) => this.circuits.available(c.id) &&
+        (!c.maxInflight || this.channelInflight(c.id) < c.maxInflight) &&
+        (this.keysByChannel.get(c.id) || []).some((k) => this.keyStatus(k) === 'active' &&
+          (!this.store.settings.maxInflightPerKey || (k.inflight || 0) < this.store.settings.maxInflightPerKey))).length,
+      openCircuits: channels.filter((c) => this.circuits.snapshot(c.id).state === 'open').length,
+      recoveringCircuits: channels.filter((c) => this.circuits.snapshot(c.id).state === 'half_open').length,
+    };
   }
 
   nextRoundRobin() {
@@ -280,9 +344,17 @@ class Pool {
 
   // ---------- outcome accounting ----------
 
+  _recordHealth(key, success) {
+    const stats = key.stats;
+    stats.healthRequests = (Number.isFinite(stats.healthRequests) ? stats.healthRequests : stats.requests || 0) + 1;
+    stats.healthSuccess = (Number.isFinite(stats.healthSuccess) ? stats.healthSuccess : stats.success || 0) + (success ? 1 : 0);
+    key.failureEwma = (key.failureEwma || 0) * 0.75 + (success ? 0 : 0.25);
+  }
+
   /** `perf` is either a latency number (legacy) or {latencyMs, ttftMs, tps}. */
   markSuccess(key, perf, usage) {
     const p = typeof perf === 'number' ? { latencyMs: perf } : perf || {};
+    this._recordHealth(key, true);
     key.consecutiveFailures = 0;
     key.consecutive429 = 0;
     key.consecutiveHard = 0;
@@ -319,6 +391,7 @@ class Pool {
   mark429(key, retryAfterMs) {
     const s = this.store.settings;
     key.consecutive429 += 1;
+    this._recordHealth(key, false);
     key.stats.requests += 1;
     key.stats.failed += 1;
     key.stats.count429 += 1;
@@ -339,6 +412,7 @@ class Pool {
   markError(key, message, { hard = false } = {}) {
     const s = this.store.settings;
     key.consecutiveFailures += 1;
+    this._recordHealth(key, false);
     if (hard) key.consecutiveHard += 1;
     else key.consecutiveHard = 0;
     key.stats.requests += 1;
@@ -472,6 +546,9 @@ class Pool {
     }
     return {
       ...ch,
+      maxInflight: ch.maxInflight || 0,
+      inflight: this.channelInflight(ch.id),
+      circuit: this.circuits.snapshot(ch.id),
       keyCount: keys.length,
       activeKeyCount: active,
       stats: {
@@ -499,6 +576,7 @@ class Pool {
       stats: {
         ...key.stats,
         consecutiveFailures: key.consecutiveFailures,
+        failureEwma: key.failureEwma || 0,
         ewmaLatencyMs: key.ewmaLatencyMs,
         ewmaTtftMs: key.ewmaTtftMs || 0,
         ewmaTps: key.ewmaTps || 0,
@@ -522,6 +600,7 @@ class Pool {
     const inKeys = Array.isArray(data.keys) ? data.keys : [];
     const inTokens = Array.isArray(data.tokens) ? data.tokens : [];
     if (mode === 'replace') {
+      this.circuits.entries.clear();
       this.store.data.channels = [];
       this.store.data.keys = [];
       this.store.data.tokens = [];
@@ -584,8 +663,11 @@ class Pool {
         ewmaTtftMs: Number(raw.ewmaTtftMs) || 0,
         ewmaTps: Number(raw.ewmaTps) || 0,
         inflight: 0,
+        failureEwma: 0,
         stats: { ...this._emptyStats(), ...(raw.stats && typeof raw.stats === 'object' ? raw.stats : {}) },
       };
+      if (!Number.isFinite(raw.stats?.healthRequests)) key.stats.healthRequests = key.stats.requests || 0;
+      if (!Number.isFinite(raw.stats?.healthSuccess)) key.stats.healthSuccess = key.stats.success || 0;
       key.stats.lastError = key.stats.lastError == null ? null : String(key.stats.lastError).slice(0, 300);
       this.store.data.keys.push(key);
       this.keysById.set(key.id, key);

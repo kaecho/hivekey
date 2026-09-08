@@ -3,20 +3,16 @@ const fs = require('fs');
 const log = require('./log');
 const path = require('path');
 
-const STRATEGY_NAMES = [
-  'adaptive',
-  'round_robin',
-  'random',
-  'weighted',
-  'least_inflight',
-  'lowest_latency',
-  'lowest_ttft',
-  'highest_throughput',
-];
+const { STRATEGY_NAMES } = require('./scheduler');
 
 const DEFAULT_SETTINGS = {
-  strategy: 'adaptive', // see STRATEGY_NAMES
+  strategy: 'auto', // existing installations keep their saved policy
   maxAttempts: 3,
+  firstByteTimeoutMs: 30_000,
+  maxInflightPerKey: 0, // 0 = unlimited
+  preferDifferentChannel: true,
+  circuitBreakerThreshold: 3, // 0 = off; only network/5xx failures count
+  circuitBreakerCooldownMs: 30_000,
   requestTimeoutMs: 300_000,
   connectTimeoutMs: 10_000,
   cooldown429BaseMs: 30_000,
@@ -136,6 +132,10 @@ class Store {
   updateSettings(patch) {
     const MIN = {
       maxAttempts: 1,
+      firstByteTimeoutMs: 100,
+      maxInflightPerKey: 0,
+      circuitBreakerThreshold: 0,
+      circuitBreakerCooldownMs: 1000,
       requestTimeoutMs: 1000,
       connectTimeoutMs: 100,
       cooldown429BaseMs: 1000,
@@ -152,11 +152,12 @@ class Store {
       } else if (k === 'retryOn') {
         const arr = Array.isArray(patch[k]) ? patch[k] : String(patch[k]).split(',');
         s[k] = arr.map((v) => parseInt(v, 10)).filter((v) => v >= 400 && v <= 599);
-      } else if (k === 'allowAnonymous') {
-        s[k] = !!patch[k];
+      } else if (k === 'allowAnonymous' || k === 'preferDifferentChannel') {
+        if (typeof patch[k] === 'boolean') s[k] = patch[k];
       } else {
         const n = parseInt(patch[k], 10);
-        if (Number.isFinite(n) && n >= (MIN[k] ?? 0)) s[k] = n;
+        const max = { maxAttempts: 20, maxInflightPerKey: 10000, circuitBreakerThreshold: 100, logLimit: 10000 }[k] ?? 86400000;
+        if (Number.isFinite(n) && n >= (MIN[k] ?? 0) && n <= max) s[k] = n;
       }
     }
     this.save();

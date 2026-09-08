@@ -3,6 +3,7 @@ const express = require('express');
 const { request: undiciRequest } = require('undici');
 const { getDispatcher, normalizeBaseUrl } = require('../proxy');
 const { maskKey } = require('../util');
+const { createRoutingRouter, routingStatus } = require('./routing');
 
 function createAdminRouter({ pool, store, stats, events, auth, config }) {
   const router = express.Router();
@@ -33,6 +34,8 @@ function createAdminRouter({ pool, store, stats, events, auth, config }) {
   // everything below requires an admin session
   router.use(auth.adminMiddleware());
 
+  router.use('/routing', createRoutingRouter({ pool, store, stats }));
+
   router.get('/auth/me', (req, res) => res.json({ username: req.adminUser }));
 
   // ---------- overview ----------
@@ -46,6 +49,7 @@ function createAdminRouter({ pool, store, stats, events, auth, config }) {
     channelCount: store.data.channels.length,
     keyCounts: pool.keyCounts(),
     problemKeys: pool.problemKeys(),
+    routing: routingStatus(pool, stats),
     history: stats.history(),
     daily: store.dailyUsage(14),
   });
@@ -282,6 +286,21 @@ function createAdminRouter({ pool, store, stats, events, auth, config }) {
     return res.json({ deleted });
   });
 
+  router.post('/keys/batch', (req, res) => {
+    const { action, ids } = req.body || {};
+    if (!['enable', 'disable', 'reset'].includes(action) || !Array.isArray(ids) || ids.length > 1000 ||
+        ids.some((id) => typeof id !== 'string')) {
+      return res.status(400).json({ error: 'expected action (enable, disable, reset) and up to 1000 key ids' });
+    }
+    let updated = 0;
+    const unique = [...new Set(ids)];
+    for (const id of unique) {
+      const key = action === 'reset' ? pool.resetKey(id) : pool.setKeyEnabled(id, action === 'enable');
+      if (key) updated += 1;
+    }
+    return res.json({ updated, skipped: unique.length - updated });
+  });
+
   // ---------- access tokens ----------
   router.get('/tokens', (req, res) => res.json(store.data.tokens));
 
@@ -313,9 +332,10 @@ function createAdminRouter({ pool, store, stats, events, auth, config }) {
     let out = stats.logs;
     if (channelId) out = out.filter((l) => l.channelId === channelId);
     if (status === 'success' || status === 'error') out = out.filter((l) => l.status === status);
+    if (req.query.retried === 'true') out = out.filter((l) => l.attempts > 1);
     if (q) {
       out = out.filter((l) =>
-        [l.model, l.path, l.channelName, l.keyMasked, l.error, l.thinking]
+        [l.id, l.model, l.path, l.channelName, l.keyMasked, l.error, l.thinking, l.routing?.effectiveStrategy]
           .some((f) => f && String(f).toLowerCase().includes(q)),
       );
     }
