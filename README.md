@@ -26,7 +26,7 @@ Gemini SDK ────▶ /v1beta/models/…/ ────┘       │ 429? 5x
 - **Full web management** — add channels, batch-import keys, search/paginate/test keys (single or all at once), enable/disable/reset keys, issue client access tokens, tune every scheduler knob — all from the browser.
 - **Backup & restore** — export the whole configuration (channels, keys, tokens, settings) as JSON and import it back (merge or replace) from the Settings page.
 - **Dark / light / auto theme** — manual toggle or follow the OS.
-- **Proxy support** — per-channel outbound HTTP(S) proxy, plus a global fallback (`OUTBOUND_PROXY`).
+- **Proxy support** — per-channel outbound HTTP(S) or SOCKS (socks5/socks5h) proxy, plus a global fallback (`OUTBOUND_PROXY`).
 - **Streaming & usage aware** — SSE responses stream straight through; token usage is extracted from both JSON and streaming responses for stats.
 - **Zero-database** — state lives in one JSON file; deploy with Docker in a minute.
 - **Bilingual dashboard (i18n)** — English and 简体中文, auto-detected from the browser with a one-click switcher.
@@ -121,7 +121,7 @@ All server configuration is via environment variables:
 | `SESSION_SECRET` | *(auto)* | Session-signing secret; auto-generated and persisted if empty |
 | `SESSION_TTL_MS` | `86400000` | Admin session lifetime (24 h) |
 | `DATA_DIR` | `./data` | Directory for `data.json` (channels, keys, tokens, settings) |
-| `OUTBOUND_PROXY` | *(empty)* | Global fallback outbound proxy (`http://host:port`); falls back to `HTTPS_PROXY`/`HTTP_PROXY` |
+| `OUTBOUND_PROXY` | *(empty)* | Global fallback outbound proxy (`http://host:port` or `socks5://host:port`); falls back to `HTTPS_PROXY`/`HTTP_PROXY` |
 | `TRUST_PROXY` | *(off)* | Number of reverse-proxy hops to trust (usually `1` behind nginx/traefik) so login rate limiting sees real client IPs; also enables the `Secure` cookie flag via `X-Forwarded-Proto` |
 | `BODY_LIMIT_BYTES` | `26214400` | Max `/v1` request body size (25 MB) |
 | `LOG_LEVEL` | `info` | Console log level: `error` / `warn` / `info` / `debug` |

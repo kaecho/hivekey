@@ -113,8 +113,15 @@ class Pool {
     });
     setIf('proxy', (v) => {
       const s = String(v ?? '').trim();
-      if (s && !/^https?:\/\//i.test(s)) {
-        throw Object.assign(new Error('proxy must be an http(s):// URL (SOCKS is not supported)'), { status: 400 });
+      if (!s) return s;
+      if (!/^(https?|socks(4|4a|5|5h)?):\/\//i.test(s)) {
+        throw Object.assign(new Error('proxy must be an http(s):// or socks:// URL (e.g. http://127.0.0.1:7890, socks5://127.0.0.1:1080)'), { status: 400 });
+      }
+      try {
+        const u = new URL(s);
+        if (!u.hostname) throw new Error('missing hostname');
+      } catch {
+        throw Object.assign(new Error('proxy is not a valid URL'), { status: 400 });
       }
       return s;
     });

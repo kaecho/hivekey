@@ -151,7 +151,7 @@ export default {
   'Basics': '基本信息',
   'Authentication': '认证',
   'Proxy': '代理',
-  '(optional, e.g. http://127.0.0.1:7890)': '（可选，如 http://127.0.0.1:7890）',
+  '(optional, e.g. http://127.0.0.1:7890 or socks5://127.0.0.1:1080)': '（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）',
   '(higher = preferred)': '（越大越优先）',
   'Models': '模型',
   '(empty = all models · trailing * wildcards supported)': '（留空 = 全部模型 · 支持结尾 * 通配符）',

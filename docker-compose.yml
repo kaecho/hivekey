@@ -10,7 +10,7 @@ services:
       - LOG_LEVEL=info
       - LOG_COLOR=always
       # - SESSION_SECRET=some-long-random-string
-      # - OUTBOUND_PROXY=http://192.168.1.1:7890   # global fallback outbound proxy
+      # - OUTBOUND_PROXY=http://192.168.1.1:7890   # global fallback outbound proxy (e.g. http://... or socks5://...)
       # - TRUST_PROXY=1                            # set when behind nginx/traefik
     volumes:
       - pool-data:/app/data

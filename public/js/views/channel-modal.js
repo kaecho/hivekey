@@ -26,7 +26,7 @@ export function openChannelModal(ch) {
           '<input name="name" required value="' + esc(ch.name || '') + '" placeholder="OpenAI main"></div>' +
         '<div class="field"><label>' + esc(t('Base URL')) + '</label>' +
           '<input name="baseUrl" required value="' + esc(ch.baseUrl || '') + '" placeholder="https://api.openai.com"></div>' +
-        '<div class="field span2"><label>' + esc(t('Proxy')) + ' <span class="muted">' + esc(t('(optional, e.g. http://127.0.0.1:7890)')) + '</span></label>' +
+        '<div class="field span2"><label>' + esc(t('Proxy')) + ' <span class="muted">' + esc(t('(optional, e.g. http://127.0.0.1:7890 or socks5://127.0.0.1:1080)')) + '</span></label>' +
           '<input name="proxy" value="' + esc(ch.proxy || '') + '"></div>' +
         '<div class="field"><label>' + esc(t('Priority')) + ' <span class="muted">' + esc(t('(higher = preferred)')) + '</span></label>' +
           '<input name="priority" type="number" step="1" value="' + esc(ch.priority != null ? ch.priority : 0) + '"></div>' +

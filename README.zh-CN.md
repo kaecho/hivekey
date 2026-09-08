@@ -26,7 +26,7 @@ Gemini SDK ────▶ /v1beta/models/…/ ────┘      │ 429? 5xx
 - **完整的 Web 管理** —— 添加渠道、批量导入 Key、搜索/分页/测试 Key(单个或一键全测)、启用/禁用/重置 Key、签发客户端访问令牌、调整所有调度参数,全部在浏览器里完成。
 - **备份与恢复** —— 在设置页把全部配置(渠道、Key、令牌、设置)导出为 JSON,并支持合并或替换两种模式导入。
 - **明暗主题** —— 深色 / 浅色 / 跟随系统,一键切换。
-- **代理支持** —— 每个渠道可单独设置出站 HTTP(S) 代理,也可配置全局兜底代理(`OUTBOUND_PROXY`)。
+- **代理支持** —— 每个渠道可单独设置出站 HTTP(S) 或 SOCKS(socks5/socks5h) 代理,也可配置全局兜底代理(`OUTBOUND_PROXY`)。
 - **流式与用量统计** —— SSE 流式响应直接透传;从 JSON 和流式响应中提取 token 用量用于统计。
 - **零数据库** —— 所有状态存在一个 JSON 文件里,用 Docker 一分钟即可部署。
 - **中英双语面板(i18n)** —— 简体中文与英文,自动跟随浏览器语言,也可一键切换。
@@ -121,7 +121,7 @@ client.models.generate_content(model="gpt-4o", contents="hello")
 | `SESSION_SECRET` | *(自动)* | 会话签名密钥;留空时自动生成并持久化 |
 | `SESSION_TTL_MS` | `86400000` | 管理员会话有效期(24 小时) |
 | `DATA_DIR` | `./data` | `data.json`(渠道/Key/令牌/设置)的存储目录 |
-| `OUTBOUND_PROXY` | *(空)* | 全局兜底出站代理(`http://host:port`);也会读取 `HTTPS_PROXY`/`HTTP_PROXY` |
+| `OUTBOUND_PROXY` | *(空)* | 全局兜底出站代理(`http://host:port` 或 `socks5://host:port`);也会读取 `HTTPS_PROXY`/`HTTP_PROXY` |
 | `TRUST_PROXY` | *(关)* | 信任的反向代理跳数(nginx/traefik 之后通常为 `1`),登录限流才能拿到真实客户端 IP;同时通过 `X-Forwarded-Proto` 启用 cookie 的 `Secure` 标志 |
 | `BODY_LIMIT_BYTES` | `26214400` | `/v1` 请求体大小上限(25 MB) |
 | `LOG_LEVEL` | `info` | 控制台日志等级:`error` / `warn` / `info` / `debug` |

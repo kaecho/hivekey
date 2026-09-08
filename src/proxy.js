@@ -1,5 +1,8 @@
 'use strict';
 const { request: undiciRequest, Agent, ProxyAgent } = require('undici');
+const { SocksClient } = require('socks');
+const net = require('node:net');
+const tls = require('node:tls');
 const { genId, maskKey, parseRetryAfterMs } = require('./util');
 const { selectCandidate, resolveStrategy } = require('./scheduler');
 const { Readable } = require('node:stream');
@@ -44,6 +47,97 @@ const MAX_TRANSLATED_BODY = 16 * 1024 * 1024; // buffered-response cap for proto
 const dispatcherCache = new Map(); // `${proxy}|${connectTimeout}` -> dispatcher (LRU, bounded)
 const MAX_DISPATCHERS = 16;
 
+function isSocksProxy(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') return false;
+  return /^socks(4|4a|5|5h)?:\/\//i.test(urlStr.trim());
+}
+
+function parseSocksProxy(proxyUrl) {
+  const u = new URL(proxyUrl);
+  const proto = u.protocol.toLowerCase();
+  let type = 5;
+  if (proto === 'socks4:' || proto === 'socks4a:') {
+    type = 4;
+  } else if (proto === 'socks5:' || proto === 'socks5h:' || proto === 'socks:') {
+    type = 5;
+  } else {
+    throw new Error(`Unsupported SOCKS protocol: ${u.protocol}`);
+  }
+  const host = u.hostname.replace(/^\[/, '').replace(/\]$/, '');
+  const port = parseInt(u.port, 10) || 1080;
+  const proxy = { host, port, type };
+  if (u.username) proxy.userId = decodeURIComponent(u.username);
+  if (u.password) proxy.password = decodeURIComponent(u.password);
+  return { proxy, protocol: proto };
+}
+
+function createSocksConnector(proxyUrl, connectTimeoutMs) {
+  const { proxy } = parseSocksProxy(proxyUrl);
+
+  return function socksConnect(opts, callback) {
+    let done = false;
+    const cb = (err, socket) => {
+      if (done) return;
+      done = true;
+      callback(err, socket);
+    };
+
+    const targetPort = Number(opts.port) || (opts.protocol === 'https:' ? 443 : 80);
+    const targetHost = opts.hostname;
+
+    const socksOpts = {
+      proxy,
+      command: 'connect',
+      destination: {
+        host: targetHost,
+        port: targetPort,
+      },
+      timeout: connectTimeoutMs || undefined,
+    };
+
+    SocksClient.createConnection(socksOpts)
+      .then(({ socket }) => {
+        socket.setNoDelay(true);
+        socket.setKeepAlive(true, 60000);
+
+        if (opts.protocol === 'https:') {
+          let servername = opts.servername;
+          if (!servername && opts.hostname && !net.isIP(opts.hostname)) {
+            servername = opts.hostname;
+          }
+
+          let tlsTimer = null;
+          if (connectTimeoutMs) {
+            tlsTimer = setTimeout(() => {
+              tlsSocket.destroy(new Error(`TLS handshake timeout after ${connectTimeoutMs}ms`));
+            }, connectTimeoutMs);
+          }
+
+          const tlsSocket = tls.connect({
+            socket,
+            servername: servername || undefined,
+            ALPNProtocols: ['http/1.1'],
+          });
+
+          tlsSocket.once('secureConnect', () => {
+            clearTimeout(tlsTimer);
+            cb(null, tlsSocket);
+          });
+
+          tlsSocket.once('error', (err) => {
+            clearTimeout(tlsTimer);
+            cb(err);
+          });
+        } else {
+          cb(null, socket);
+        }
+      })
+      .catch((err) => {
+        cb(err);
+      });
+  };
+}
+
 function getDispatcher(proxyUrl, connectTimeoutMs) {
   const cacheKey = `${proxyUrl || ''}|${connectTimeoutMs}`;
   let d = dispatcherCache.get(cacheKey);
@@ -54,7 +148,18 @@ function getDispatcher(proxyUrl, connectTimeoutMs) {
     return d;
   }
   const opts = { connect: { timeout: connectTimeoutMs } };
-  d = proxyUrl ? new ProxyAgent({ uri: proxyUrl, ...opts }) : new Agent(opts);
+  if (proxyUrl) {
+    if (isSocksProxy(proxyUrl)) {
+      d = new Agent({
+        ...opts,
+        connect: createSocksConnector(proxyUrl, connectTimeoutMs),
+      });
+    } else {
+      d = new ProxyAgent({ uri: proxyUrl, ...opts });
+    }
+  } else {
+    d = new Agent(opts);
+  }
   dispatcherCache.set(cacheKey, d);
   if (dispatcherCache.size > MAX_DISPATCHERS) {
     const [oldKey, oldDispatcher] = dispatcherCache.entries().next().value;
@@ -63,6 +168,7 @@ function getDispatcher(proxyUrl, connectTimeoutMs) {
   }
   return d;
 }
+
 
 /** "https://host/v1/" and "https://host" both mean upstream root "https://host". */
 function normalizeBaseUrl(baseUrl) {
@@ -809,4 +915,15 @@ async function closeDispatchers() {
   dispatcherCache.clear();
 }
 
-module.exports = { createProxyHandler, normalizeBaseUrl, createUsageScanner, describeThinking, getDispatcher, readSnippet, closeDispatchers };
+module.exports = {
+  createProxyHandler,
+  normalizeBaseUrl,
+  createUsageScanner,
+  describeThinking,
+  getDispatcher,
+  readSnippet,
+  closeDispatchers,
+  isSocksProxy,
+  parseSocksProxy,
+  createSocksConnector,
+};

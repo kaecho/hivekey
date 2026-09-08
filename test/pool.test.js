@@ -30,8 +30,13 @@ test('channel CRUD and validation', () => {
   assert.strictEqual(ch.priority, 0);
 
   assert.throws(() => pool.createChannel({ name: 'bad', baseUrl: 'ftp://x' }), /baseUrl/);
-  assert.throws(() => pool.createChannel({ name: 'bad', baseUrl: 'https://x', proxy: 'socks5://h:1' }), /proxy/);
+  assert.throws(() => pool.createChannel({ name: 'bad', baseUrl: 'https://x', proxy: 'ftp://h:1' }), /proxy/);
+  assert.throws(() => pool.createChannel({ name: 'bad', baseUrl: 'https://x', proxy: 'socks5://' }), /proxy/);
 
+  const socksCh = pool.createChannel({ name: 'socks-ch', baseUrl: 'https://x', proxy: 'socks5://127.0.0.1:1080' });
+  assert.strictEqual(socksCh.proxy, 'socks5://127.0.0.1:1080');
+  pool.updateChannel(socksCh.id, { proxy: 'socks5h://user:pass@127.0.0.1:1080' });
+  assert.strictEqual(socksCh.proxy, 'socks5h://user:pass@127.0.0.1:1080');
   pool.updateChannel(ch.id, { priority: 5, models: 'gpt-4o, gpt-4o-mini' });
   assert.strictEqual(ch.priority, 5);
   assert.deepStrictEqual(ch.models, ['gpt-4o', 'gpt-4o-mini']);
