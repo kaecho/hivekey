@@ -15,6 +15,7 @@ export async function renderLogs() {
           '<option value="">' + esc(t('All statuses')) + '</option>' +
           '<option value="success"' + (f.status === 'success' ? ' selected' : '') + '>' + esc(t('Success')) + '</option>' +
           '<option value="error"' + (f.status === 'error' ? ' selected' : '') + '>' + esc(t('Error')) + '</option>' +
+          '<option value="aborted"' + (f.status === 'aborted' ? ' selected' : '') + '>' + esc(t('Aborted')) + '</option>' +
         '</select>' +
         '<select name="limit" aria-label="' + esc(t('Row limit')) + '">' +
           [50, 100, 200, 500].map((n) =>
@@ -165,7 +166,9 @@ export function logDetailHtml(en) {
   } else {
     html += '<div class="muted">' + esc(en.status === 'success'
       ? t('No retries. The first attempt succeeded.')
-      : t('No retries. The first attempt failed.')) + '</div>';
+      : en.status === 'aborted'
+        ? t('No retries. The client disconnected.')
+        : t('No retries. The first attempt failed.')) + '</div>';
   }
   return html;
 }

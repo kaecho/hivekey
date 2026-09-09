@@ -94,12 +94,13 @@ class Store {
     if (!this.data.usage || typeof this.data.usage !== 'object') this.data.usage = {};
     let rec = this.data.usage[day];
     if (!rec) {
-      rec = this.data.usage[day] = { requests: 0, success: 0, failed: 0, promptTokens: 0, completionTokens: 0 };
+      rec = this.data.usage[day] = { requests: 0, success: 0, failed: 0, aborted: 0, promptTokens: 0, completionTokens: 0 };
       const days = Object.keys(this.data.usage).sort();
       while (days.length > 45) delete this.data.usage[days.shift()];
     }
     rec.requests += 1;
     if (entry && entry.status === 'success') rec.success += 1;
+    else if (entry && entry.status === 'aborted') rec.aborted = (rec.aborted || 0) + 1;
     else rec.failed += 1;
     rec.promptTokens += (entry && entry.promptTokens) || 0;
     rec.completionTokens += (entry && entry.completionTokens) || 0;
@@ -118,6 +119,7 @@ class Store {
         requests: rec.requests || 0,
         success: rec.success || 0,
         failed: rec.failed || 0,
+        aborted: rec.aborted || 0,
         promptTokens: rec.promptTokens || 0,
         completionTokens: rec.completionTokens || 0,
       });

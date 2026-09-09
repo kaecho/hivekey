@@ -164,7 +164,7 @@ export function renderDashStats() {
   const totals = ov.totals || {};
   const today = (ov.daily || []).slice(-1)[0] || {};
   box.innerHTML = metric('Requests today', fmtNum(today.requests || 0), t('{n} tokens today', { n: fmtNum((today.promptTokens || 0) + (today.completionTokens || 0)) }), 'activity') +
-    metric('Success rate', pct(totals.success, totals.requests), t('{ok} ok / {failed} failed', { ok: fmtNum(totals.success || 0), failed: fmtNum(totals.failed || 0) }), 'shield', 'accent') +
+    metric('Success rate', pct(totals.success, (totals.requests || 0) - (totals.aborted || 0)), t('{ok} ok / {failed} failed', { ok: fmtNum(totals.success || 0), failed: fmtNum(totals.failed || 0) }) + (totals.aborted ? ' · ' + t('{n} aborted', { n: fmtNum(totals.aborted) }) : ''), 'shield', 'accent') +
     metric('In flight', fmtNum(store.live.size), t('{n} requests per minute', { n: ov.rpm || 0 }), 'route') +
     metric('Auto-recovered', fmtNum(totals.recovered || 0), t('Failed attempts rescued since startup'), 'spark', 'accent');
   const routing = ov.routing || {};

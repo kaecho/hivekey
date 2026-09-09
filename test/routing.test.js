@@ -332,7 +332,74 @@ test('client cancellation before first byte releases capacity without punishing 
   assert.equal(key.inflight, 0);
   assert.equal(key.stats.failed, 0);
   assert.equal(ctx.pool.circuits.snapshot(ch.id).failures, 0);
+  assert.equal(ctx.stats.logs[0].status, 'aborted');
   assert.equal(ctx.stats.logs[0].error, 'client disconnected before completion');
+  // a client walk-away is not a request failure
+  assert.equal(ctx.stats.totals.failed, 0);
+  assert.equal(ctx.stats.totals.aborted, 1);
+  const day = ctx.store.data.usage[Store.dayKey()];
+  assert.equal(day.failed, 0);
+  assert.equal(day.aborted, 1);
+});
+
+test('client disconnect mid-stream records an abort without punishing the key', async (t) => {
+  const ctx = await fixture(t, [(req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"par"}}]}\n\n');
+    // stall: never end, so only the client can close this response
+  }]);
+  const ch = addChannel(ctx.pool, { baseUrl: ctx.urls[0] });
+  const controller = new AbortController();
+  const pending = ctx.request({ stream: true }, { signal: controller.signal });
+  const response = await pending;
+  const reader = response.body.getReader();
+  await reader.read(); // first SSE chunk forwarded downstream
+  controller.abort();
+  await reader.cancel().catch(() => {});
+  for (let attempt = 0; attempt < 50 && !ctx.stats.logs.length; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  const [key] = ctx.pool.keysByChannel.get(ch.id);
+  assert.equal(key.inflight, 0);
+  assert.equal(key.stats.failed, 0);
+  assert.equal(key.failureEwma, 0);
+  assert.equal(ctx.pool.circuits.snapshot(ch.id).failures, 0);
+  assert.equal(ctx.stats.logs[0].status, 'aborted');
+  assert.equal(ctx.stats.logs[0].error, 'client disconnected mid-response');
+  assert.equal(ctx.stats.totals.failed, 0);
+  assert.equal(ctx.stats.totals.aborted, 1);
+  const day = ctx.store.data.usage[Store.dayKey()];
+  assert.equal(day.failed, 0);
+  assert.equal(day.aborted, 1);
+});
+
+test('an open circuit is probed by the next real request after the cooldown', async (t) => {
+  let hits = 0;
+  const flaky = (req, res) => {
+    hits += 1;
+    if (hits === 1) { res.writeHead(503); res.end('maintenance'); return; }
+    success(req, res);
+  };
+  const ctx = await fixture(t, [flaky]);
+  const ch = addChannel(ctx.pool, { baseUrl: ctx.urls[0] });
+  ctx.store.updateSettings({ maxAttempts: 1, circuitBreakerThreshold: 1, circuitBreakerCooldownMs: 1000, cooldownErrorBaseMs: 1000, cooldownMaxMs: 1000 });
+  const failed = await ctx.request();
+  await failed.text();
+  assert.equal(failed.status, 503);
+  assert.equal(ctx.pool.circuits.snapshot(ch.id).state, 'open');
+
+  // while the circuit cools down the channel gets no traffic at all
+  const during = await ctx.request();
+  await during.text();
+  assert.equal(during.status, 503);
+  assert.equal(hits, 1);
+
+  // after the cooldown the next real request becomes the single recovery probe
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const probe = await ctx.request();
+  assert.equal(probe.status, 200);
+  assert.equal((await probe.json()).choices[0].message.content, 'recovered');
+  assert.equal(hits, 2, 'exactly one probe request reached the upstream');
+  assert.equal(ctx.pool.circuits.snapshot(ch.id).state, 'closed');
+  assert.equal(ctx.stats.logs[0].status, 'success');
 });
 
 test('channel health protection is independent from HTTP retry policy', async (t) => {
@@ -355,4 +422,40 @@ test('recreated channel circuits reject outcomes from removed channel instances'
   assert.equal(cb.snapshot('reused-id').state, 'closed');
   cb.failure(fresh, 'fresh failure');
   assert.equal(cb.snapshot('reused-id').state, 'open');
+});
+
+test('pool.diagnoseCandidates distinguishes channel and key causes', () => {
+  const store = {
+    settings: { maxInflightPerKey: 2, circuitBreakerThreshold: 1, circuitBreakerCooldownMs: 10000 },
+    data: {
+      channels: [
+        { id: 'ch1', name: 'main', enabled: true, priority: 0, models: ['test-model'], maxInflight: 0 },
+      ],
+      keys: [
+        { id: 'k1', channelId: 'ch1', enabled: false, autoDisabled: true, cooldownUntil: 0, inflight: 0, stats: {} },
+      ],
+    },
+    save: () => {},
+  };
+  const pool = new Pool(store);
+  const diagAutoDisabled = pool.diagnoseCandidates('test-model');
+  assert.equal(diagAutoDisabled.type, 'key');
+  assert.match(diagAutoDisabled.detail, /auto-disabled/);
+
+  store.data.keys[0].autoDisabled = false;
+  const diagDisabled = pool.diagnoseCandidates('test-model');
+  assert.equal(diagDisabled.type, 'key');
+  assert.equal(diagDisabled.detail, 'all keys are disabled');
+
+  store.data.keys[0].enabled = true;
+  store.data.keys[0].cooldownUntil = Date.now() + 5000;
+  const diagCooldown = pool.diagnoseCandidates('test-model');
+  assert.equal(diagCooldown.type, 'key');
+  assert.match(diagCooldown.detail, /all active keys are in cooldown/);
+
+  store.data.keys[0].cooldownUntil = 0;
+  store.data.channels[0].enabled = false;
+  const diagChDisabled = pool.diagnoseCandidates('test-model');
+  assert.equal(diagChDisabled.type, 'channel');
+  assert.equal(diagChDisabled.detail, 'all matching channels are disabled');
 });

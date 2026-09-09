@@ -216,6 +216,7 @@ export async function withBusy(btn, fn) {
 }
 
 export function statusBadgeHtml(en) {
+  if (en.status === 'aborted') return '<span class="badge badge-cooldown">' + esc(t('aborted')) + '</span>';
   const ok = en.status === 'success';
   const label = (en.statusCode != null && en.statusCode !== 0)
     ? en.statusCode

@@ -14,6 +14,7 @@ class Stats {
       requests: 0,
       success: 0,
       failed: 0,
+      aborted: 0,
       retries: 0,
       recovered: 0,
       promptTokens: 0,
@@ -36,6 +37,7 @@ class Stats {
         requests: 0,
         success: 0,
         failed: 0,
+        aborted: 0,
         latencySum: 0,
         latencyCount: 0,
         ttftSum: 0,
@@ -62,7 +64,9 @@ class Stats {
     const now = Date.now();
     this.totals.requests += 1;
     const ok = logEntry.status === 'success';
+    const aborted = logEntry.status === 'aborted';
     if (ok) this.totals.success += 1;
+    else if (aborted) this.totals.aborted += 1;
     else this.totals.failed += 1;
     if (ok && logEntry.attempts > 1) this.totals.recovered += 1;
     if (logEntry.routing) {
@@ -77,6 +81,7 @@ class Stats {
     const b = this._bucket(now);
     b.requests += 1;
     if (ok) b.success += 1;
+    else if (aborted) b.aborted += 1;
     else b.failed += 1;
     if (Number.isFinite(logEntry.latencyMs)) {
       b.latencySum += logEntry.latencyMs;

@@ -484,6 +484,8 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       const tag = `${entry.method} ${entry.path} model=${entry.model || '-'} ch=${entry.channelName || '-'} key=${entry.keyMasked || '-'}${thinkTag} ${entry.latencyMs}ms #${entry.attempts}`;
       if (entry.status === 'success') {
         log.info(`ok  ${tag} ${entry.statusCode}${entry.stream ? ' stream' : ''}`);
+      } else if (entry.status === 'aborted') {
+        log.info(`abrt ${tag} ${entry.error || ''}`.trim());
       } else {
         log.error(`fail ${tag} ${entry.statusCode || ''} ${entry.error || 'error'}`.trim());
       }
@@ -498,7 +500,7 @@ function createProxyHandler({ pool, store, stats, events, config }) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (clientGone) {
-        finish({ status: 'error', error: 'client disconnected before completion' });
+        finish({ status: 'aborted', error: 'client disconnected before completion' });
         return;
       }
 
@@ -512,9 +514,16 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       const decision = resolveStrategy(settings.strategy, candidates, context);
       const picked = selectCandidate(candidates, decision.effectiveStrategy, pool, context);
       if (!picked) {
+        const diag = pool.diagnoseCandidates(model, tried, candidateOptions());
+        const isChannelIssue = diag.type === 'channel';
         const detail = lastFailure
           ? `last upstream failure: ${lastFailure.statusCode || ''} ${lastFailure.message || ''}`.trim()
-          : 'no enabled channel/key matches this request';
+          : diag.detail;
+        if (isChannelIssue) {
+          finish({ status: 'error', statusCode: 503, error: `no available channels (${detail})` });
+          sendError(503, `no available channels for model "${model ?? 'unknown'}" — ${detail}`);
+          return;
+        }
         finish({ status: 'error', statusCode: 503, error: `no available upstream keys (${detail})` });
         sendError(503, `no available upstream keys for model "${model ?? 'unknown'}" — ${detail}`);
         return;
@@ -524,8 +533,8 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       tried.add(key.id);
       const lease = pool.acquire(picked);
       if (!lease) {
-        finish({ status: 'error', statusCode: 503, error: 'channel recovery probe already in flight' });
-        sendError(503, 'channel recovery probe already in flight');
+        finish({ status: 'error', statusCode: 503, error: 'no available channels (channel recovery probe already in flight)' });
+        sendError(503, `no available channels for model "${model ?? 'unknown'}" — channel recovery probe already in flight`);
         return;
       }
       let firstByteTimer;
@@ -593,8 +602,12 @@ function createProxyHandler({ pool, store, stats, events, config }) {
       requestTimer = setTimeout(() => expire('request deadline exceeded'), remainingMs);
       // Do not clip the first-byte timer to the shared deadline: two timers at
       // the same instant can race and incorrectly charge the key for our budget.
-      if (settings.firstByteTimeoutMs < remainingMs) {
-        firstByteTimer = setTimeout(() => expire('first byte timeout'), settings.firstByteTimeoutMs);
+      const isThinking = !!thinking && !thinking.startsWith('off');
+      const effectiveFirstByteMs = isThinking
+        ? Math.max(settings.firstByteTimeoutMs, Math.min(remainingMs, Math.max(120000, settings.firstByteTimeoutMs * 2)))
+        : settings.firstByteTimeoutMs;
+      if (effectiveFirstByteMs < remainingMs) {
+        firstByteTimer = setTimeout(() => expire('first byte timeout'), effectiveFirstByteMs);
         firstByteTimer.unref?.();
       }
       requestTimer.unref?.();
@@ -632,7 +645,7 @@ function createProxyHandler({ pool, store, stats, events, config }) {
         release();
         res.removeListener('close', onClientClose);
         if (clientGone) {
-          finish({ status: 'error', error: 'client disconnected before completion' });
+          finish({ status: 'aborted', error: 'client disconnected before completion' });
           return;
         }
         const message = timeoutKind || `network error: ${err?.cause?.code || err?.code || err?.message || 'unknown'}`;
@@ -738,7 +751,15 @@ function createProxyHandler({ pool, store, stats, events, config }) {
           }
         } else if (kind === 'client_gone') {
           controller.abort();
-          finish({ status: 'error', statusCode, error: 'client disconnected mid-response' });
+          // Partial tokens really were consumed upstream; record them, but as an
+          // abort — a client walk-away is not a channel failure.
+          finish({
+            status: 'aborted',
+            statusCode,
+            error: 'client disconnected mid-response',
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+          });
         } else {
           if (timeoutKind === 'request deadline exceeded') {
             errMessage = timeoutKind;

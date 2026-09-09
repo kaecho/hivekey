@@ -331,7 +331,7 @@ function createAdminRouter({ pool, store, stats, events, auth, config }) {
     const q = String(req.query.q || '').toLowerCase();
     let out = stats.logs;
     if (channelId) out = out.filter((l) => l.channelId === channelId);
-    if (status === 'success' || status === 'error') out = out.filter((l) => l.status === status);
+    if (status === 'success' || status === 'error' || status === 'aborted') out = out.filter((l) => l.status === status);
     if (req.query.retried === 'true') out = out.filter((l) => l.attempts > 1);
     if (q) {
       out = out.filter((l) =>

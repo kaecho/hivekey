@@ -647,3 +647,34 @@ test('login rate limiting kicks in after repeated failures', async () => {
   }
   assert.ok(limited, 'expected a 429 after repeated failed logins');
 });
+
+test('reports no available channels with specific detail when no channel matches model', async () => {
+  const res = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${poolToken}` },
+    body: JSON.stringify({ model: 'non-existent-model-xyz' }),
+  });
+  assert.strictEqual(res.status, 503);
+  const err = await res.json();
+  assert.match(err.error.message, /no available channels for model "non-existent-model-xyz" — no channel configured for model "non-existent-model-xyz"/);
+});
+
+test('reports no available channels when all matching channels are disabled', async () => {
+  const ch = await api('/api/channels', {
+    method: 'POST',
+    body: { name: 'mock-disabled-ch', baseUrl: mockBase, models: ['disabled-ch-model'], keys: 'k1' },
+  });
+  await api(`/api/channels/${ch.json.id}`, {
+    method: 'PUT',
+    body: { enabled: false },
+  });
+
+  const res = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${poolToken}` },
+    body: JSON.stringify({ model: 'disabled-ch-model' }),
+  });
+  assert.strictEqual(res.status, 503);
+  const err = await res.json();
+  assert.match(err.error.message, /no available channels for model "disabled-ch-model" — all matching channels are disabled/);
+});

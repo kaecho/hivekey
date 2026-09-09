@@ -306,6 +306,147 @@ class Pool {
     }
     return priorities.length ? tiers.get(priorities[0]) : [];
   }
+  /**
+   * Diagnostic details explaining why no candidate is available for a request.
+   * Distinguishes channel-level unavailability from key-level unavailability.
+   */
+  diagnoseCandidates(model, excludeKeyIds = new Set(), { avoidChannelIds = new Set() } = {}) {
+    const now = Date.now();
+    const channels = this.store.data.channels || [];
+    const matchingChannels = channels.filter(
+      (ch) => !model || !ch.models?.length || Pool.modelMatches(ch.models, model)
+    );
+    if (!matchingChannels.length) {
+      return {
+        type: 'channel',
+        detail: model ? `no channel configured for model "${model}"` : 'no channels configured',
+      };
+    }
+
+    const enabledChannels = matchingChannels.filter((ch) => ch.enabled);
+    if (!enabledChannels.length) {
+      return {
+        type: 'channel',
+        detail: 'all matching channels are disabled',
+      };
+    }
+
+    const circuitSnapshots = enabledChannels.map((ch) => ({
+      channel: ch,
+      snapshot: this.circuits.snapshot(ch.id),
+    }));
+
+    const openCircuits = circuitSnapshots.filter((s) => s.snapshot.state === 'open');
+    if (openCircuits.length === enabledChannels.length) {
+      const waitSeconds = Math.max(
+        1,
+        Math.ceil((Math.min(...openCircuits.map((s) => s.snapshot.retryAt)) - now) / 1000)
+      );
+      return {
+        type: 'channel',
+        detail: `all matching channels are circuit-broken (cooling down for ${waitSeconds}s)`,
+      };
+    }
+
+    const probingCircuits = circuitSnapshots.filter(
+      (s) => s.snapshot.state === 'half_open' && s.snapshot.probeInFlight
+    );
+    if (probingCircuits.length === enabledChannels.length) {
+      return {
+        type: 'channel',
+        detail: 'channel recovery probe in flight',
+      };
+    }
+
+    const inflightFull = enabledChannels.filter(
+      (ch) => ch.maxInflight > 0 && this.channelInflight(ch.id) >= ch.maxInflight
+    );
+    if (inflightFull.length === enabledChannels.length) {
+      return {
+        type: 'channel',
+        detail: 'all matching channels reached concurrency limit',
+      };
+    }
+
+    const availableChannels = enabledChannels.filter(
+      (ch) =>
+        this.circuits.available(ch.id) &&
+        (!ch.maxInflight || this.channelInflight(ch.id) < ch.maxInflight)
+    );
+
+    if (avoidChannelIds.size > 0 && availableChannels.every((ch) => avoidChannelIds.has(ch.id))) {
+      return {
+        type: 'channel',
+        detail: 'all available channels were excluded as failing domains',
+      };
+    }
+
+    if (!availableChannels.length) {
+      return {
+        type: 'channel',
+        detail: 'no available channels',
+      };
+    }
+
+    const allKeys = availableChannels.flatMap((ch) => this.keysByChannel.get(ch.id) || []);
+    if (!allKeys.length) {
+      return {
+        type: 'key',
+        detail: 'no keys configured for available channels',
+      };
+    }
+
+    const disabledKeys = allKeys.filter((k) => !k.enabled);
+    if (disabledKeys.length === allKeys.length) {
+      const autoCount = disabledKeys.filter((k) => k.autoDisabled).length;
+      if (autoCount > 0) {
+        return {
+          type: 'key',
+          detail: `all keys are disabled (${autoCount} auto-disabled after consecutive failures)`,
+        };
+      }
+      return {
+        type: 'key',
+        detail: 'all keys are disabled',
+      };
+    }
+
+    const enabledKeys = allKeys.filter((k) => k.enabled);
+    const coolingKeys = enabledKeys.filter((k) => k.cooldownUntil > now);
+    if (coolingKeys.length === enabledKeys.length) {
+      const waitSeconds = Math.max(
+        1,
+        Math.ceil((Math.min(...coolingKeys.map((k) => k.cooldownUntil)) - now) / 1000)
+      );
+      return {
+        type: 'key',
+        detail: `all active keys are in cooldown (retry in ${waitSeconds}s)`,
+      };
+    }
+
+    const cap = this.store.settings.maxInflightPerKey;
+    if (cap > 0) {
+      const fullKeys = enabledKeys.filter((k) => (k.inflight || 0) >= cap);
+      if (fullKeys.length === enabledKeys.length) {
+        return {
+          type: 'key',
+          detail: `all active keys reached concurrency limit (${cap})`,
+        };
+      }
+    }
+
+    if (excludeKeyIds.size > 0 && enabledKeys.every((k) => excludeKeyIds.has(k.id))) {
+      return {
+        type: 'key',
+        detail: 'all available keys have already been tried in this request',
+      };
+    }
+
+    return {
+      type: 'key',
+      detail: 'no enabled channel/key matches this request',
+    };
+  }
 
   channelInflight(id) {
     return (this.keysByChannel.get(id) || []).reduce((n, k) => n + (k.inflight || 0), 0);
